@@ -1,6 +1,7 @@
 export * from './axios';
 export * from './streams';
 export * from './azure';
+export * from './author';
 export * from './code';
 export * from './common';
 export * from './content';
