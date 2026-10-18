@@ -622,8 +622,8 @@ export class Chat {
     this.restored = undefined;
     const active = createActiveRequest(continued?.generation ?? paused?.generation);
     const { generation } = active;
-    if (dropped && !continued) {
-      /** Another generation than the one that dropped: no frame has named its response yet. */
+    if (generation.responseId === undefined) {
+      /** A reattachment this chat did not prepare has no response until a frame names one. */
       generation.responseUnknown = true;
     }
     generation.endpoint = this.resumeEndpoint() ?? dropped?.target.endpoint;
@@ -1019,12 +1019,6 @@ export class Chat {
     if (this.active) {
       throw new Error('A request is in flight; its stream reports the pause');
     }
-    /** A status read names the running generation, which a stop then addresses. */
-    this.unaddressed = false;
-    if (this.detached && this.detached.target.generationCreatedAt !== generationCreatedAt) {
-      /** The pause belongs to a newer generation than the one whose stream dropped. */
-      this.detached = undefined;
-    }
     if (this.resumed.has(action.actionId) && generationCreatedAt === this.generationCreatedAt) {
       /** A status read before the answer landed reports a pause this chat already resumed. */
       return;
@@ -1032,6 +1026,12 @@ export class Chat {
     if (generationCreatedAt === this.stoppedGeneration) {
       /** A status read before the stop landed reports a pause of a generation it ended. */
       return;
+    }
+    /** A current status read names the running generation, which a stop then addresses. */
+    this.unaddressed = false;
+    if (this.detached && this.detached.target.generationCreatedAt !== generationCreatedAt) {
+      /** The pause belongs to a newer generation than the one whose stream dropped. */
+      this.detached = undefined;
     }
     if (isExpired(action)) {
       /**
@@ -1462,6 +1462,13 @@ export class Chat {
   private track(active: ActiveRequest, event: ChatEvent): void {
     if (event.type === 'pending_action') {
       active.generation.paused = event.data.actionId;
+    } else if (event.type === 'created') {
+      /** A legacy first turn names its conversation here, with no sync frame to follow. */
+      const named = event.data.message?.conversationId;
+      const known = active.generation.conversationId;
+      if (named && (known == null || known === Constants.NEW_CONVO)) {
+        active.generation.conversationId = named;
+      }
     } else if (event.type === 'sync') {
       /** The server's ids for the turn, which an Assistants stop addresses. */
       active.generation.conversationId =
