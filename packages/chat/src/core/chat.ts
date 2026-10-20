@@ -345,6 +345,19 @@ const isGone = (error: ChatTransportError): boolean =>
 const isStreamAbort = (result: ChatAbortResult): result is ChatStreamAbortResult =>
   result != null && 'success' in result;
 
+/**
+ * How a stop's answer says the run had already ended on its own: a settled stream, or an
+ * Assistants answer of `null`, which finds no run left and leaves the host to reload what it kept.
+ */
+const getSettledAs = (result: ChatAbortResult): ChatStreamAbortResult['terminalStatus'] => {
+  if (result === null) {
+    return 'complete';
+  }
+  return isStreamAbort(result) && result.settled
+    ? (result.terminalStatus ?? 'complete')
+    : undefined;
+};
+
 /** A pause past its expiry, whose resume the server refuses. */
 const isExpired = (action: Agents.PendingAction): boolean =>
   action.expiresAt != null && action.expiresAt <= Date.now();
@@ -764,9 +777,8 @@ export class Chat {
       if (isStreamAbort(result)) {
         generation.stoppedConversationId = result.aborted;
       }
-      if (isStreamAbort(result) && result.settled) {
-        generation.settledAs = result.terminalStatus ?? 'complete';
-      } else if (isStreamAbort(result) && result.persistenceFailed) {
+      generation.settledAs = getSettledAs(result);
+      if (!generation.settledAs && isStreamAbort(result) && result.persistenceFailed) {
         generation.persistenceFailed = true;
       }
       return result;
@@ -790,6 +802,10 @@ export class Chat {
     const { generation } = active;
     if (result && 'runMessages' in result) {
       await this.mergeRunMessages(result.runMessages, () => this.active === active);
+      active.controller.abort();
+      active.stream?.close();
+    } else if (result === null) {
+      /** No Assistants run was left to stop, so its stream will not report an end either. */
       active.controller.abort();
       active.stream?.close();
     } else if (!active.stream && !generation.persistenceFailed) {
@@ -931,13 +947,15 @@ export class Chat {
     responseId: string | undefined,
     responseUnknown?: boolean,
   ): boolean {
-    if (!isStreamAbort(result) || (!result.settled && !result.persistenceFailed)) {
+    const settledAs = getSettledAs(result);
+    const persistenceFailed = isStreamAbort(result) && result.persistenceFailed;
+    if (!settledAs && !persistenceFailed) {
       return false;
     }
     const outcome = getStopOutcome({
-      settledAs: result.settled ? (result.terminalStatus ?? 'complete') : undefined,
-      persistenceFailed: result.persistenceFailed,
-      stoppedConversationId: result.aborted,
+      settledAs,
+      persistenceFailed,
+      stoppedConversationId: isStreamAbort(result) ? result.aborted : undefined,
     });
     this.publish(outcome, responseId, responseUnknown);
     return true;
@@ -1345,16 +1363,17 @@ export class Chat {
     } finally {
       stream.close();
     }
-    if (!outcome && signal.aborted) {
-      outcome = { kind: 'abort' };
-    }
     const unresolved = !outcome || (outcome.kind === 'error' && outcome.disconnect);
     if (unresolved && active.generation.stopAnswered) {
       /** A stream that ended during a stop is settled by the server's answer to it. */
       await active.generation.stopAnswered;
     }
     if (active.generation.stopped && unresolved) {
+      /** Including one the stop itself closed, whose answer may say the run had already ended. */
       outcome = getStopOutcome(active.generation);
+    }
+    if (!outcome && signal.aborted) {
+      outcome = { kind: 'abort' };
     }
     this.settle(
       outcome ?? {
