@@ -532,8 +532,8 @@ export class Chat {
   private disposed = false;
   /** A generation whose stream dropped while the server kept it running. */
   private detached?: DetachedGeneration;
-  /** The timestamps of the generations a stop ended, whose later pauses are stale. */
-  private readonly stoppedGenerations = new Set<number>();
+  /** The timestamps of the generations a stop or their own stream ended, whose later pauses are stale. */
+  private readonly endedGenerations = new Set<number>();
   /** The generation a restored pause belongs to, which a reattachment to it continues. */
   private restored?: { createdAt: number; generation: Generation };
   /** A start that reached the transport and lost its response, with nothing to address it by. */
@@ -780,7 +780,7 @@ export class Chat {
     const answer = this.abortOnServer(target).then((result) => {
       generation.stopped = true;
       if (target.generationCreatedAt != null) {
-        this.stoppedGenerations.add(target.generationCreatedAt);
+        this.endedGenerations.add(target.generationCreatedAt);
       }
       if (isStreamAbort(result)) {
         generation.stoppedConversationId = result.aborted;
@@ -865,7 +865,7 @@ export class Chat {
       () => {
         /** Like any confirmed stop, so a late status read of its pause is ignored. */
         if (generationCreatedAt != null) {
-          this.stoppedGenerations.add(generationCreatedAt);
+          this.endedGenerations.add(generationCreatedAt);
         }
       },
       (error: unknown) =>
@@ -1063,8 +1063,8 @@ export class Chat {
       /** A status read before the answer landed reports a pause this chat already resumed. */
       return;
     }
-    if (this.stoppedGenerations.has(generationCreatedAt)) {
-      /** A status read before the stop landed reports a pause of a generation it ended. */
+    if (this.endedGenerations.has(generationCreatedAt)) {
+      /** A status read before the end landed reports a pause of a generation that ended. */
       return;
     }
     /** A current status read names the running generation, which a stop then addresses. */
@@ -1536,6 +1536,10 @@ export class Chat {
        */
       this.action = undefined;
       this.decisions.clear();
+      const ended = active.stream?.generationCreatedAt ?? active.inheritedGeneration;
+      if (active.stream && ended != null) {
+        this.endedGenerations.add(ended);
+      }
     }
     this.publish(outcome, active.generation.responseId, active.generation.responseUnknown);
   }
